@@ -128,7 +128,7 @@ export default function LoginPage() {
           {stage === 'phone' && (
             <div className="animate-fade">
               <h2 style={{ fontSize:20, fontWeight:700, marginBottom:6 }}>Enter Mobile Number</h2>
-              <p style={{ color:'var(--text-secondary)', fontSize:14, marginBottom:24 }}>We'll send you a verification OTP</p>
+              <p style={{ color:'var(--text-secondary)', fontSize:14, marginBottom:24 }}>We'll send you a real OTP via SMS</p>
               <div style={{ display:'flex', gap:8, marginBottom:8 }}>
                 <div style={{
                   padding:'0 14px', background:'var(--bg-card2)', border:'1px solid var(--border)',
@@ -139,9 +139,9 @@ export default function LoginPage() {
                   value={mobile} onChange={e => setMobile(e.target.value.replace(/\D/g,'').slice(0,10))}
                   onKeyDown={e => e.key === 'Enter' && handleSendOTP()} type="tel" />
               </div>
-              <p style={{ fontSize:11, color:'var(--text-muted)', marginBottom:20 }}>
-                📋 Test: 9876577267 (Resident) · 9999999999 (Admin) · 8888888888 (Guard)
-              </p>
+              
+              <div id="recaptcha-container" style={{ margin: '10px 0', display: 'flex', justifyContent: 'center' }}></div>
+              
               <button className="btn btn-primary w-full" onClick={handleSendOTP} disabled={loading || mobile.length !== 10}>
                 {loading ? <Spinner size={18} color="#fff" /> : 'Send OTP →'}
               </button>
@@ -156,7 +156,7 @@ export default function LoginPage() {
               <p style={{ color:'var(--text-secondary)', fontSize:14, marginBottom:8 }}>
                 Sent to +91 {mobile}
               </p>
-              {generatedOTP ? (
+              {generatedOTP && (
                 <div style={{
                   background:'rgba(107,203,119,0.1)', border:'1px solid rgba(107,203,119,0.3)',
                   borderRadius:'var(--radius-md)', padding:'10px 14px', marginBottom:20,
@@ -169,10 +169,6 @@ export default function LoginPage() {
                     <div style={{ fontSize:10, color:'var(--text-muted)' }}>Use this OTP to register (Demo Mode)</div>
                   </div>
                 </div>
-              ) : (
-                <p style={{ fontSize:11, color:'var(--warning)', marginBottom:24 }}>
-                  📋 Demo OTPs → Resident: 123201 · Admin: 111111 · Guard: 222222
-                </p>
               )}
               <OTPInput value={otp} onChange={setOtp} length={6} />
               <div style={{ textAlign:'center', margin:'16px 0' }}>

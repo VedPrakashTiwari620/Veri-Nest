@@ -12,6 +12,7 @@
 
 import { initializeApp } from 'firebase/app';
 import { getFirestore } from 'firebase/firestore';
+import { getAuth } from 'firebase/auth';
 
 const firebaseConfig = {
   apiKey:            import.meta.env.VITE_FB_API_KEY            || "",
@@ -27,14 +28,16 @@ const isConfigured = !!firebaseConfig.apiKey && !!firebaseConfig.projectId;
 
 let app = null;
 let db = null;
+let auth = null;
 
 if (isConfigured) {
   app = initializeApp(firebaseConfig);
   db = getFirestore(app);
+  auth = getAuth(app);
   console.log('🔥 Firebase connected → Firestore active');
 } else {
   console.log('⚠️ Firebase not configured → Using local mock data');
 }
 
-export { db, isConfigured };
+export { db, auth, isConfigured };
 export default app;

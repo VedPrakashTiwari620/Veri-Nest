@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useEffect } from 'react';
-import { MOCK_USERS } from '../data/mockData';
+import { auth, isConfigured } from '../firebase';
+import { RecaptchaVerifier, signInWithPhoneNumber, onAuthStateChanged, signOut } from 'firebase/auth';
 
 const AuthContext = createContext(null);
 
@@ -8,55 +9,71 @@ export const AuthProvider = ({ children }) => {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const stored = localStorage.getItem('vn_user');
-    if (stored) {
-      try { setUser(JSON.parse(stored)); } catch {}
+    if (!isConfigured) {
+      // Fallback for demo mode
+      const stored = localStorage.getItem('vn_user');
+      if (stored) {
+        try { setUser(JSON.parse(stored)); } catch {}
+      }
+      setLoading(false);
+      return;
     }
-    setLoading(false);
+
+    // Real Firebase Auth listener
+    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
+      if (firebaseUser) {
+        const stored = localStorage.getItem('vn_user');
+        let localData = stored ? JSON.parse(stored) : {};
+        setUser({
+          ...localData,
+          uid: firebaseUser.uid,
+          mobile: firebaseUser.phoneNumber?.replace('+91', '') || localData.mobile,
+        });
+      } else {
+        setUser(null);
+      }
+      setLoading(false);
+    });
+
+    return () => unsubscribe();
   }, []);
 
-  const sendOTP = async (mobile) => {
-    await new Promise(r => setTimeout(r, 1200));
-    const found = MOCK_USERS.find(u => u.mobile === mobile);
-    if (found) {
-      return { success: true, testMode: true, isKnown: true, message: 'OTP sent successfully' };
+  const sendOTP = async (mobile, recaptchaContainerId = 'recaptcha-container') => {
+    if (!isConfigured) return { success: false, message: 'Firebase not configured' };
+    
+    try {
+      if (!window.recaptchaVerifier) {
+        window.recaptchaVerifier = new RecaptchaVerifier(auth, recaptchaContainerId, { size: 'invisible' });
+      }
+      const confirmationResult = await signInWithPhoneNumber(auth, `+91${mobile}`, window.recaptchaVerifier);
+      window.confirmationResult = confirmationResult;
+      return { success: true, message: 'OTP sent successfully' };
+    } catch (error) {
+      console.error(error);
+      return { success: false, message: error.message };
     }
-    // New user - generate random 6-digit OTP and store in sessionStorage
-    const generatedOTP = String(Math.floor(100000 + Math.random() * 900000));
-    sessionStorage.setItem(`otp_${mobile}`, generatedOTP);
-    return { success: true, testMode: true, isKnown: false, generatedOTP, message: 'OTP sent successfully' };
   };
 
   const verifyOTP = async (mobile, otp) => {
-    await new Promise(r => setTimeout(r, 1000));
-    const found = MOCK_USERS.find(u => u.mobile === mobile && u.otp === otp);
-    if (found) {
-      const userData = {
-        ...found,
-        token: `jwt_mock_${Date.now()}`,
-        loginTime: new Date().toISOString(),
-        isNewUser: false,
-      };
-      return { success: true, user: userData };
-    }
-    const stored = sessionStorage.getItem(`otp_${mobile}`);
-    if (stored && stored === otp) {
-      sessionStorage.removeItem(`otp_${mobile}`);
+    if (!isConfigured) return { success: false, message: 'Firebase not configured' };
+
+    try {
+      if (!window.confirmationResult) throw new Error("No OTP requested");
+      const result = await window.confirmationResult.confirm(otp);
+      
       const userData = {
         mobile,
+        uid: result.user.uid,
         role: 'resident',
-        name: null,
-        residentId: `RES_${mobile.slice(-4)}_${Date.now().toString().slice(-4)}`,
-        flat: null,
-        tower: null,
-        token: `jwt_mock_${Date.now()}`,
-        loginTime: new Date().toISOString(),
-        isNewUser: true,
+        residentId: `RES_${mobile.slice(-4)}`,
+        isNewUser: true, // You can check Firestore here if they exist
         verified: false,
       };
       return { success: true, user: userData, isNewUser: true };
+    } catch (error) {
+      console.error(error);
+      return { success: false, message: 'Invalid OTP. Please try again.' };
     }
-    return { success: false, message: 'Invalid OTP. Please try again.' };
   };
 
   const login = (userData) => {
@@ -64,7 +81,8 @@ export const AuthProvider = ({ children }) => {
     localStorage.setItem('vn_user', JSON.stringify(userData));
   };
 
-  const logout = () => {
+  const logout = async () => {
+    if (isConfigured) await signOut(auth);
     setUser(null);
     localStorage.removeItem('vn_user');
     localStorage.removeItem('vn_verified');
