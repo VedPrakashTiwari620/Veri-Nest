@@ -42,9 +42,12 @@ export const AuthProvider = ({ children }) => {
     if (!isConfigured) return { success: false, message: 'Firebase not configured' };
     
     try {
-      if (!window.recaptchaVerifier) {
-        window.recaptchaVerifier = new RecaptchaVerifier(auth, recaptchaContainerId, { size: 'invisible' });
+      if (window.recaptchaVerifier) {
+        window.recaptchaVerifier.clear();
+        window.recaptchaVerifier = null;
       }
+      window.recaptchaVerifier = new RecaptchaVerifier(auth, recaptchaContainerId, { size: 'invisible' });
+      
       const confirmationResult = await signInWithPhoneNumber(auth, `+91${mobile}`, window.recaptchaVerifier);
       window.confirmationResult = confirmationResult;
       return { success: true, message: 'OTP sent successfully' };
