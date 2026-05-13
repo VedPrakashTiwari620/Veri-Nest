@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { HashRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { ToastContainer } from './components/UI';
 
@@ -63,10 +63,10 @@ function AppRoutes() {
 export default function App() {
   return (
     <AuthProvider>
-      <BrowserRouter>
+      <HashRouter>
         <ToastContainer />
         <AppRoutes />
-      </BrowserRouter>
+      </HashRouter>
     </AuthProvider>
   );
 }
