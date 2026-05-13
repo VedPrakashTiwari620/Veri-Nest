@@ -51,7 +51,7 @@ export default function LoginPage() {
       else setGeneratedOTP(null);
       toast.success('OTP sent successfully!');
       setStage('otp');
-    } else toast.error('Failed to send OTP');
+    } else toast.error(res.message || 'Failed to send OTP');
   };
 
   const handleVerifyOTP = async () => {
