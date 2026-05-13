@@ -187,6 +187,11 @@ export default function VerifyPage() {
   }, [stopCamera]);
 
   const runAiProcessing = async () => {
+    // Hard fail if challenges not completed
+    if (challenge !== 'done') {
+      toast.error('❌ Complete all liveness challenges first!');
+      return;
+    }
     setLoading(true);
     for (let i = 0; i < AI_STAGES.length; i++) {
       setAiStage(i);
@@ -194,9 +199,14 @@ export default function VerifyPage() {
     }
     setLoading(false);
     setAiStage(-1);
-    const finalScore = Math.max(liveScore, challenge === 'done' ? 98 : 72);
-    setLivenessResult({ liveness: true, confidence: finalScore, status: 'LIVE_PERSON_CONFIRMED' });
-    toast.success(`✅ Liveness confirmed! Real AI Score: ${finalScore}%`);
+    // Only use real liveScore — no fallback
+    if (liveScore < 55) {
+      toast.error('❌ Liveness check failed. Please try again.');
+      setCapturedImg(null);
+      return;
+    }
+    setLivenessResult({ liveness: true, confidence: liveScore, status: 'LIVE_PERSON_CONFIRMED' });
+    toast.success(`✅ Live person confirmed! AI Score: ${liveScore}%`);
   };
 
   // --- Aadhaar ---
@@ -398,7 +408,15 @@ export default function VerifyPage() {
                     <button className="btn btn-primary w-full" onClick={startCamera}>📷 Open Camera</button>
                   )}
                   {cameraOn && (
-                    <button className="btn btn-primary w-full animate-pulse-glow" onClick={capturePhoto}>📸 Capture Photo</button>
+                    <>
+                      {challenge !== 'done' ? (
+                        <div style={{ background:'rgba(255,165,0,0.1)', border:'1px solid rgba(255,165,0,0.3)', borderRadius:'var(--radius-md)', padding:'10px 14px', textAlign:'center', fontSize:13, color:'var(--warning)' }}>
+                          ⚠️ Complete all challenges to capture photo
+                        </div>
+                      ) : (
+                        <button className="btn btn-primary w-full animate-pulse-glow" onClick={capturePhoto}>📸 Capture Photo</button>
+                      )}
+                    </>
                   )}
                   {capturedImg && !loading && (
                     <div style={{ display: 'flex', gap: 10 }}>
