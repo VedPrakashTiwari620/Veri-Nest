@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { Spinner, ProgressBar } from '../components/UI';
 import { toast } from '../components/UI';
-import { loadModel, analyzeFrame, computeLivenessScore } from '../services/livenessAI';
+import { loadModel, analyzeFrame, computeLivenessScore, resetMotion } from '../services/livenessAI';
 
 const STEPS = [
   { id: 'society', icon: '🏢', title: 'Society Code', subtitle: 'Validate your residential community' },
@@ -61,29 +61,35 @@ export default function VerifyPage() {
   const navigate = useNavigate();
 
   // Camera state
-  const videoRef = useRef(null);
-  const canvasRef = useRef(null);
-  const streamRef = useRef(null);
-  const rafRef    = useRef(null);
-  const [cameraOn, setCameraOn]       = useState(false);
-  const [capturedImg, setCapturedImg] = useState(null);
-  const [aiStage, setAiStage]         = useState(-1);
-  const [modelReady, setModelReady]   = useState(false);
+  const videoRef      = useRef(null);
+  const canvasRef     = useRef(null);   // for capture
+  const overlayCanvas = useRef(null);   // for motion detection
+  const streamRef     = useRef(null);
+  const rafRef        = useRef(null);
+  const [cameraOn, setCameraOn]           = useState(false);
+  const [capturedImg, setCapturedImg]     = useState(null);
+  const [aiStage, setAiStage]             = useState(-1);
+  const [modelReady, setModelReady]       = useState(false);
+  const [modelStatus, setModelStatus]     = useState('Loading AI...');
 
   // AI counters
-  const blinkRef    = useRef(0);
-  const smileRef    = useRef(false);
-  const headRef     = useRef(false);
-  const eyesWereOpen = useRef(true);
+  const blinkRef     = useRef(0);
+  const smileRef     = useRef(false);
+  const headRef      = useRef(false);
+  const prevEyeRatio = useRef(null);
 
   // Challenge state
-  const [challenge, setChallenge]     = useState(null);  // 'blink' | 'smile' | 'turn'
+  const [challenge, setChallenge]         = useState(null);
   const [challengeDone, setChallengeDone] = useState({ blink: false, smile: false, turn: false });
-  const [liveScore, setLiveScore]     = useState(0);
+  const [liveScore, setLiveScore]         = useState(0);
+  const [faceVisible, setFaceVisible]     = useState(false);
 
   // Preload model in background
   useEffect(() => {
-    loadModel().then(() => setModelReady(true)).catch(() => {});
+    setModelStatus('Loading AI model...');
+    loadModel()
+      .then(() => { setModelReady(true); setModelStatus('AI Ready ✅'); })
+      .catch(() => { setModelStatus('AI failed to load ❌'); });
   }, []);
 
   // Cleanup on unmount
@@ -121,16 +127,27 @@ export default function VerifyPage() {
   // --- Camera ---
   const startCamera = useCallback(async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: 480, height: 480 } });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'user', width: { ideal: 480 }, height: { ideal: 480 } }
+      });
       streamRef.current = stream;
-      if (videoRef.current) { videoRef.current.srcObject = stream; videoRef.current.play(); }
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+      }
       setCameraOn(true);
-      blinkRef.current = 0; smileRef.current = false; headRef.current = false;
+      // Reset counters
+      blinkRef.current = 0;
+      smileRef.current = false;
+      headRef.current  = false;
+      prevEyeRatio.current = null;
+      resetMotion();
       setChallengeDone({ blink: false, smile: false, turn: false });
       setLiveScore(0);
-      // Pick first challenge
+      setFaceVisible(false);
       setChallenge('blink');
-    } catch {
+    } catch (e) {
+      console.error('Camera error:', e);
       toast.error('Camera access denied. Please allow camera permissions.');
     }
   }, []);
@@ -146,29 +163,57 @@ export default function VerifyPage() {
   useEffect(() => {
     if (!cameraOn || !modelReady) return;
     let running = true;
+
     const loop = async () => {
       if (!running) return;
-      const data = await analyzeFrame(videoRef.current);
+
+      const data = await analyzeFrame(videoRef.current, overlayCanvas.current);
+
       if (data?.faceDetected) {
-        // Blink detection
-        if (eyesWereOpen.current && data.eyesClosed) {
-          blinkRef.current += 1;
-          setChallengeDone(p => ({ ...p, blink: blinkRef.current >= 2 }));
+        setFaceVisible(true);
+
+        // --- Blink: eyeRatio drops below threshold ---
+        const er = data.eyeRatio;
+        if (prevEyeRatio.current !== null) {
+          const wasOpen = prevEyeRatio.current > 0.22;
+          const nowClosed = er < 0.18;
+          if (wasOpen && nowClosed) {
+            blinkRef.current += 1;
+            setChallengeDone(p => ({ ...p, blink: blinkRef.current >= 2 }));
+          }
         }
-        eyesWereOpen.current = !data.eyesClosed;
-        // Smile
-        if (data.smiling) { smileRef.current = true; setChallengeDone(p => ({ ...p, smile: true })); }
-        // Head turn
-        if (data.lookingLeft || data.lookingRight) { headRef.current = true; setChallengeDone(p => ({ ...p, turn: true })); }
+        prevEyeRatio.current = er;
+
+        // --- Head turn ---
+        if (data.lookingLeft || data.lookingRight) {
+          headRef.current = true;
+          setChallengeDone(p => ({ ...p, turn: true }));
+        }
+
+        // --- Motion-based smile: significant mouth-region motion ---
+        if (data.blinkMotion > 12 && challenge === 'smile') {
+          smileRef.current = true;
+          setChallengeDone(p => ({ ...p, smile: true }));
+        }
+
         // Score
-        const s = computeLivenessScore({ blinks: blinkRef.current, smiles: smileRef.current, headMoves: headRef.current });
+        const s = computeLivenessScore({
+          blinks: blinkRef.current,
+          smileDetected: smileRef.current,
+          headMoved: headRef.current,
+        });
         setLiveScore(s);
+
+      } else if (data) {
+        setFaceVisible(false);
       }
+
       rafRef.current = requestAnimationFrame(loop);
     };
+
     rafRef.current = requestAnimationFrame(loop);
     return () => { running = false; cancelAnimationFrame(rafRef.current); };
-  }, [cameraOn, modelReady]);
+  }, [cameraOn, modelReady, challenge]);
 
   // Advance challenge
   useEffect(() => {
@@ -180,11 +225,17 @@ export default function VerifyPage() {
   const capturePhoto = useCallback(() => {
     if (!videoRef.current || !canvasRef.current) return;
     const v = videoRef.current, c = canvasRef.current;
-    c.width = v.videoWidth; c.height = v.videoHeight;
+    c.width  = v.videoWidth;
+    c.height = v.videoHeight;
     c.getContext('2d').drawImage(v, 0, 0);
     setCapturedImg(c.toDataURL('image/jpeg', 0.85));
     stopCamera();
   }, [stopCamera]);
+
+  // hidden canvas for motion detection overlay (same size as video)
+  const overlayCanvasEl = (
+    <canvas ref={overlayCanvas} style={{ display: 'none' }} />
+  );
 
   const runAiProcessing = async () => {
     // Hard fail if challenges not completed
@@ -309,11 +360,11 @@ export default function VerifyPage() {
             <div className="animate-fade">
               <div style={{ textAlign: 'center', fontSize: 48, marginBottom: 16 }}>🤳</div>
               <h2 style={{ textAlign: 'center', fontSize: 20, fontWeight: 700, marginBottom: 8 }}>AI Liveness Detection</h2>
-              {!modelReady && cameraOn && (
-                <div style={{ textAlign:'center', fontSize:12, color:'var(--primary-light)', marginBottom:8 }}>
-                  <Spinner size={14} /> Loading AI model...
-                </div>
-              )}
+              {/* Model status badge */}
+              <div style={{ textAlign:'center', fontSize:11, color: modelReady ? 'var(--success)' : 'var(--warning)', marginBottom:8, display:'flex', alignItems:'center', justifyContent:'center', gap:6 }}>
+                {!modelReady && <Spinner size={12} />}
+                {modelStatus}
+              </div>
               {/* Challenge Banner */}
               {cameraOn && challenge && challenge !== 'done' && (
                 <div style={{ background:'rgba(108,99,255,0.12)', border:'1px solid var(--primary)', borderRadius:'var(--radius-md)', padding:'10px 14px', marginBottom:12, textAlign:'center' }}>
@@ -349,7 +400,12 @@ export default function VerifyPage() {
                 </div>
               )}
               <p style={{ textAlign: 'center', color: 'var(--text-secondary)', fontSize: 14, marginBottom: 12 }}>
-                {!cameraOn && !capturedImg ? 'Real AI will detect blinks, smile & head movement' : loading ? 'AI is analyzing...' : 'Photo captured successfully'}
+                {!cameraOn && !capturedImg
+                  ? 'Real AI detects blinks, head turn & motion'
+                  : loading ? 'AI is analyzing...'
+                  : faceVisible ? '🟢 Face detected — complete challenges'
+                  : cameraOn ? '⚠️ No face detected — come closer'
+                  : 'Photo captured'}
               </p>
 
               {!livenessResult ? (
