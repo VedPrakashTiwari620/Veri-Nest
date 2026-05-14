@@ -163,6 +163,8 @@ export default function VerifyPage() {
   useEffect(() => {
     if (!cameraOn || !modelReady) return;
     let running = true;
+    // Track motion history for spike detection (blink = sudden high→low→high motion)
+    let eyeMotionHistory = [];
 
     const loop = async () => {
       if (!running) return;
@@ -172,17 +174,16 @@ export default function VerifyPage() {
       if (data?.faceDetected) {
         setFaceVisible(true);
 
-        // --- Blink: eyeRatio drops below threshold ---
-        const er = data.eyeRatio;
-        if (prevEyeRatio.current !== null) {
-          const wasOpen = prevEyeRatio.current > 0.22;
-          const nowClosed = er < 0.18;
-          if (wasOpen && nowClosed) {
-            blinkRef.current += 1;
-            setChallengeDone(p => ({ ...p, blink: blinkRef.current >= 2 }));
-          }
+        // --- Blink: spike in eye-region pixel motion ---
+        const em = data.eyeMotion;
+        eyeMotionHistory.push(em);
+        if (eyeMotionHistory.length > 6) eyeMotionHistory.shift();
+
+        // A blink = motion spike > 5px avg diff (eyes close & reopen)
+        if (em > 5) {
+          blinkRef.current += 1;
+          setChallengeDone(p => ({ ...p, blink: blinkRef.current >= 2 }));
         }
-        prevEyeRatio.current = er;
 
         // --- Head turn ---
         if (data.lookingLeft || data.lookingRight) {
@@ -190,8 +191,8 @@ export default function VerifyPage() {
           setChallengeDone(p => ({ ...p, turn: true }));
         }
 
-        // --- Motion-based smile: significant mouth-region motion ---
-        if (data.blinkMotion > 12 && challenge === 'smile') {
+        // --- Smile: mouth-region pixel motion while in smile challenge ---
+        if (data.mouthMotion > 6 && challenge === 'smile') {
           smileRef.current = true;
           setChallengeDone(p => ({ ...p, smile: true }));
         }

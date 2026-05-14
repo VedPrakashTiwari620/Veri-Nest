@@ -1,8 +1,8 @@
 /**
- * Liveness AI Service
- * Uses BlazeFace (Google) for face detection +
- * Canvas frame-differencing for real blink/motion detection
- * Reliable in all browsers, no MediaPipe dependency
+ * Liveness AI Service v3
+ * BlazeFace for face/head detection
+ * Eye-region pixel motion for blink detection (works with BlazeFace 6 landmarks)
+ * Mouth-region pixel motion for smile detection
  */
 
 import * as tf from '@tensorflow/tfjs';
@@ -14,7 +14,6 @@ let modelLoading = false;
 export async function loadModel() {
   if (model) return model;
   if (modelLoading) {
-    // Wait for existing load to finish
     while (modelLoading) await new Promise(r => setTimeout(r, 100));
     return model;
   }
@@ -23,100 +22,122 @@ export async function loadModel() {
     await tf.setBackend('webgl');
     await tf.ready();
     model = await blazeface.load();
-    console.log('✅ BlazeFace model loaded');
-  } catch (e) {
-    console.warn('WebGL failed, trying CPU:', e);
-    await tf.setBackend('cpu');
-    await tf.ready();
-    model = await blazeface.load();
-    console.log('✅ BlazeFace loaded (CPU mode)');
+    console.log('✅ BlazeFace loaded (WebGL)');
+  } catch {
+    try {
+      await tf.setBackend('cpu');
+      await tf.ready();
+      model = await blazeface.load();
+      console.log('✅ BlazeFace loaded (CPU)');
+    } catch (e) {
+      console.error('BlazeFace load failed:', e);
+    }
   } finally {
     modelLoading = false;
   }
   return model;
 }
 
-// ─── Frame differencing for motion / blink detection ───────────────
-let prevFrame = null;
+// ─── Per-region motion tracker ─────────────────────────────────────
+const regionHistory = {};
 
-export function detectMotion(canvas, regionY = 0, regionH = 1.0) {
-  const ctx = canvas.getContext('2d');
-  const w = canvas.width;
-  const h = canvas.height;
-  const rY = Math.floor(h * regionY);
-  const rH = Math.floor(h * regionH);
-  const curr = ctx.getImageData(0, rY, w, rH);
+function getRegionMotion(ctx, key, x, y, w, h) {
+  if (w <= 0 || h <= 0) return 0;
+  let curr;
+  try { curr = ctx.getImageData(x, y, w, h); } catch { return 0; }
 
-  if (!prevFrame || prevFrame.length !== curr.data.length) {
-    prevFrame = curr.data.slice();
-    return 0;
-  }
+  const prev = regionHistory[key];
+  regionHistory[key] = curr.data.slice();
+
+  if (!prev || prev.length !== curr.data.length) return 0;
 
   let diff = 0;
   for (let i = 0; i < curr.data.length; i += 4) {
-    diff += Math.abs(curr.data[i] - prevFrame[i]);       // R
-    diff += Math.abs(curr.data[i + 1] - prevFrame[i + 1]); // G
-    diff += Math.abs(curr.data[i + 2] - prevFrame[i + 2]); // B
+    diff += Math.abs(curr.data[i]   - prev[i]);
+    diff += Math.abs(curr.data[i+1] - prev[i+1]);
+    diff += Math.abs(curr.data[i+2] - prev[i+2]);
   }
-  prevFrame = curr.data.slice();
-  const pixels = w * rH;
-  return diff / (pixels * 3); // 0-255 average diff per pixel
+  return diff / (curr.data.length / 4 * 3); // avg diff per pixel (0-255)
 }
 
-// ─── Analyse a single video frame ──────────────────────────────────
+// ─── Main frame analyser ────────────────────────────────────────────
 export async function analyzeFrame(videoEl, overlayCanvas) {
   if (!model || !videoEl || videoEl.readyState < 2) return null;
-  if (!videoEl.videoWidth) return null;
+  const vw = videoEl.videoWidth;
+  const vh = videoEl.videoHeight;
+  if (!vw || !vh) return null;
 
-  // Draw frame to overlay canvas for motion detection
+  // Draw current frame to overlay canvas
+  let ctx = null;
   if (overlayCanvas) {
-    overlayCanvas.width  = videoEl.videoWidth;
-    overlayCanvas.height = videoEl.videoHeight;
-    overlayCanvas.getContext('2d').drawImage(videoEl, 0, 0);
+    overlayCanvas.width  = vw;
+    overlayCanvas.height = vh;
+    ctx = overlayCanvas.getContext('2d');
+    ctx.drawImage(videoEl, 0, 0);
   }
 
   try {
-    const predictions = await model.estimateFaces(videoEl, false);
-    if (!predictions.length) return { faceDetected: false };
+    const preds = await model.estimateFaces(videoEl, false);
+    if (!preds.length) return { faceDetected: false };
 
-    const face = predictions[0];
-    const [, y1] = face.topLeft;
-    const [, y2] = face.bottomRight;
+    const face = preds[0];
+    const [x1, y1] = face.topLeft;
+    const [x2, y2] = face.bottomRight;
+    const faceW = x2 - x1;
     const faceH = y2 - y1;
-    const faceW = (face.bottomRight[0] - face.topLeft[0]);
 
-    // Landmarks: [rightEye, leftEye, nose, mouth, rightEar, leftEar]
-    const landmarks = face.landmarks;
-    const rightEye = landmarks[0];
-    const leftEye  = landmarks[1];
-    const mouth    = landmarks[3];
+    // BlazeFace landmarks: [rightEye, leftEye, nose, mouth, rightEar, leftEar]
+    const lm = face.landmarks;
+    const rightEye = lm[0]; // [x, y]
+    const leftEye  = lm[1];
+    const nose     = lm[2];
+    const mouth    = lm[3];
 
-    // Eye openness proxy: distance between pupils / face height
-    const eyeDist = Math.hypot(leftEye[0] - rightEye[0], leftEye[1] - rightEye[1]);
-    const eyeRatio = eyeDist / faceH; // higher = eyes more open
-
-    // Head yaw proxy: nose horizontal offset from eye midpoint
+    // ── Head yaw (horizontal turn) ───────────────────────────────
     const eyeMidX = (leftEye[0] + rightEye[0]) / 2;
-    const nose    = landmarks[2];
-    const yaw     = (nose[0] - eyeMidX) / faceW; // -0.5 left, +0.5 right
+    const yaw = (nose[0] - eyeMidX) / faceW;
 
-    // Motion in upper face region (blink proxy)
-    let motionScore = 0;
-    if (overlayCanvas) {
-      const relY = (y1 / videoEl.videoHeight);
-      const relH = (faceH / videoEl.videoHeight) * 0.5; // top half of face
-      motionScore = detectMotion(overlayCanvas, relY, relH);
+    // ── Eye-region motion (blink) ────────────────────────────────
+    let eyeMotion = 0;
+    if (ctx) {
+      const eyeRegionH = Math.max(4, Math.floor(faceH * 0.18));
+      const eyeRegionW = Math.max(4, Math.floor(faceW * 0.70));
+      const eyeRegionX = Math.max(0, Math.floor(x1 + faceW * 0.15));
+      // Eyes sit in the upper ~35% of the face bounding box
+      const eyeRegionY = Math.max(0, Math.floor(y1 + faceH * 0.20));
+
+      eyeMotion = getRegionMotion(
+        ctx, 'eyes',
+        eyeRegionX, eyeRegionY,
+        Math.min(eyeRegionW, vw - eyeRegionX),
+        Math.min(eyeRegionH, vh - eyeRegionY),
+      );
+    }
+
+    // ── Mouth-region motion (smile / open mouth) ─────────────────
+    let mouthMotion = 0;
+    if (ctx) {
+      const mRegionH = Math.max(4, Math.floor(faceH * 0.18));
+      const mRegionW = Math.max(4, Math.floor(faceW * 0.50));
+      const mRegionX = Math.max(0, Math.floor(mouth[0] - mRegionW / 2));
+      const mRegionY = Math.max(0, Math.floor(mouth[1] - mRegionH / 2));
+
+      mouthMotion = getRegionMotion(
+        ctx, 'mouth',
+        mRegionX, mRegionY,
+        Math.min(mRegionW, vw - mRegionX),
+        Math.min(mRegionH, vh - mRegionY),
+      );
     }
 
     return {
-      faceDetected: true,
-      eyeRatio,                   // ~0.3+ = eyes open, <0.2 = blink
-      blinkMotion: motionScore,   // >8 = significant eye movement
-      yaw,                        // <-0.06 = left, >0.06 = right
-      lookingLeft:  yaw < -0.06,
-      lookingRight: yaw > 0.06,
-      mouth,
-      probability: face.probability[0],
+      faceDetected:  true,
+      eyeMotion,                  // >6 = blink (significant eyelid movement)
+      mouthMotion,                // >8 = mouth movement / smile
+      yaw,                        // <-0.06 left, >0.06 right
+      lookingLeft:   yaw < -0.06,
+      lookingRight:  yaw >  0.06,
+      probability:   face.probability[0],
     };
   } catch (e) {
     console.warn('analyzeFrame error:', e);
@@ -124,15 +145,15 @@ export async function analyzeFrame(videoEl, overlayCanvas) {
   }
 }
 
-// ─── Compute final liveness score ──────────────────────────────────
+// ─── Score ──────────────────────────────────────────────────────────
 export function computeLivenessScore({ blinks, smileDetected, headMoved }) {
   let score = 30;
-  score += Math.min(blinks, 3) * 18;   // max 54 from blinks
+  score += Math.min(blinks, 3) * 18;   // up to 54 pts
   score += smileDetected ? 10 : 0;
-  score += headMoved ? 6 : 0;
+  score += headMoved     ?  6 : 0;
   return Math.min(score, 100);
 }
 
 export function resetMotion() {
-  prevFrame = null;
+  Object.keys(regionHistory).forEach(k => delete regionHistory[k]);
 }
