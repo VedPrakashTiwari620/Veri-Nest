@@ -73,11 +73,14 @@ export default function VerifyPage() {
   const [modelReady, setModelReady]       = useState(false);
   const [modelStatus, setModelStatus]     = useState('Loading AI...');
 
-  // Blink cooldown: prevent counting same blink 30 times
-  const blinkCooldown  = useRef(false);
-  const blinkRef       = useRef(0);
-  const smileRef       = useRef(false);
-  const headRef        = useRef(false);
+  // Blink: track face probability drop (eyes closing reduces detection confidence)
+  const blinkCooldown      = useRef(false);
+  const prevProbRef        = useRef(null);
+  const challengeStartTime = useRef(Date.now()); // gate: only count events AFTER challenge appears
+  const blinkRef           = useRef(0);
+  const smileRef           = useRef(false);
+  const headRef            = useRef(false);
+  const headSeenDirs       = useRef({ left: false, right: false }); // require BOTH directions for turn
 
   const [challenge, setChallenge]         = useState(null);
   const [challengeDone, setChallengeDone] = useState({ blink: false, smile: false, turn: false });
@@ -136,10 +139,14 @@ export default function VerifyPage() {
         await videoRef.current.play();
       }
       setCameraOn(true);
-      blinkRef.current = 0;
-      smileRef.current = false;
-      headRef.current  = false;
+      // Reset ALL counters
+      blinkRef.current     = 0;
+      smileRef.current     = false;
+      headRef.current      = false;
       blinkCooldown.current = false;
+      prevProbRef.current  = null;
+      headSeenDirs.current = { left: false, right: false };
+      challengeStartTime.current = Date.now() + 1500; // 1.5s grace so initial noise ignored
       resetMotion();
       setChallengeDone({ blink: false, smile: false, turn: false });
       setLiveScore(0);
@@ -158,37 +165,51 @@ export default function VerifyPage() {
     setCameraOn(false);
   }, []);
 
-  // Real-time AI loop
+  // Real-time AI loop — time-gated anti-spoof
   useEffect(() => {
     if (!cameraOn || !modelReady) return;
     let running = true;
 
     const loop = async () => {
       if (!running) return;
+      const now = Date.now();
+      const afterGrace = now > challengeStartTime.current;
 
       const data = await analyzeFrame(videoRef.current, offscreenRef.current);
 
       if (data?.faceDetected) {
         setFaceVisible(true);
+        const prob = data.prob ?? 1;
 
-        // BLINK: spike in eye-region motion + cooldown to avoid double-counting
-        const em = data.eyeMotion ?? 0;
-        if (em > 4 && !blinkCooldown.current) {
-          blinkCooldown.current = true;
-          blinkRef.current += 1;
-          setChallengeDone(p => ({ ...p, blink: blinkRef.current >= 2 }));
-          // Cooldown 600ms so one blink = one event
-          setTimeout(() => { blinkCooldown.current = false; }, 600);
+        // ── BLINK: face probability drop (real eyes closing lowers detection confidence)
+        // Photo on screen: probability stays near 1.0 constantly
+        // Real blink: prob drops below 0.75, then recovers
+        if (afterGrace && challenge === 'blink') {
+          if (prevProbRef.current !== null) {
+            const wasHigh = prevProbRef.current > 0.80;
+            const nowLow  = prob < 0.72;
+            if (wasHigh && nowLow && !blinkCooldown.current) {
+              blinkCooldown.current = true;
+              blinkRef.current += 1;
+              setChallengeDone(p => ({ ...p, blink: blinkRef.current >= 2 }));
+              setTimeout(() => { blinkCooldown.current = false; }, 800);
+            }
+          }
+          prevProbRef.current = prob;
         }
 
-        // HEAD TURN
-        if (data.lookingLeft || data.lookingRight) {
-          headRef.current = true;
-          setChallengeDone(p => ({ ...p, turn: true }));
+        // ── HEAD TURN: require BOTH left AND right (photo/video can't fake this)
+        if (afterGrace && challenge === 'turn') {
+          if (data.lookingLeft)  headSeenDirs.current.left  = true;
+          if (data.lookingRight) headSeenDirs.current.right = true;
+          if (headSeenDirs.current.left && headSeenDirs.current.right) {
+            headRef.current = true;
+            setChallengeDone(p => ({ ...p, turn: true }));
+          }
         }
 
-        // SMILE: mouth motion > threshold
-        if ((data.mouthMotion ?? 0) > 5 && challenge === 'smile') {
+        // ── SMILE: mouth motion spike only during smile challenge
+        if (afterGrace && challenge === 'smile' && (data.mouthMotion ?? 0) > 18) {
           smileRef.current = true;
           setChallengeDone(p => ({ ...p, smile: true }));
         }
@@ -201,11 +222,26 @@ export default function VerifyPage() {
         setLiveScore(s);
 
       } else if (data) {
+        // No face detected frame — useful for blink detection
         setFaceVisible(false);
+        if (afterGrace && challenge === 'blink' && prevProbRef.current !== null && prevProbRef.current > 0.80) {
+          // Face disappeared briefly (strong blink or full eye closure)
+          if (!blinkCooldown.current) {
+            blinkCooldown.current = true;
+            blinkRef.current += 1;
+            setChallengeDone(p => ({ ...p, blink: blinkRef.current >= 2 }));
+            setTimeout(() => { blinkCooldown.current = false; }, 800);
+          }
+        }
+        prevProbRef.current = 0;
       }
 
       rafRef.current = requestAnimationFrame(loop);
     };
+
+    // Reset time gate whenever challenge changes
+    challengeStartTime.current = Date.now() + 800;
+    prevProbRef.current = null;
 
     rafRef.current = requestAnimationFrame(loop);
     return () => { running = false; cancelAnimationFrame(rafRef.current); };
@@ -361,7 +397,7 @@ export default function VerifyPage() {
                   <div style={{ fontSize:13, fontWeight:700, color:'var(--primary-light)' }}>
                     {challenge === 'blink' && '👁️ Please BLINK your eyes twice'}
                     {challenge === 'smile' && '😊 Now SMILE for the camera'}
-                    {challenge === 'turn' && '↔️ Turn your head LEFT or RIGHT'}
+                    {challenge === 'turn' && '↔️ Turn head LEFT then RIGHT'}
                   </div>
                   <div style={{ display:'flex', gap:8, justifyContent:'center', marginTop:8 }}>
                     {[['blink','👁️ Blink ×2'],['smile','😊 Smile'],['turn','↔️ Head Turn']].map(([k,l]) => (
