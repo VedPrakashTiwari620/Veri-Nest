@@ -60,31 +60,31 @@ export default function VerifyPage() {
   const { setVerified } = useAuth();
   const navigate = useNavigate();
 
-  // Camera state
+  // Camera refs
   const videoRef      = useRef(null);
-  const canvasRef     = useRef(null);   // for capture
-  const overlayCanvas = useRef(null);   // for motion detection
+  const canvasRef     = useRef(null);   // capture
+  const offscreenRef  = useRef(null);   // motion detection (hidden, rendered in JSX)
   const streamRef     = useRef(null);
   const rafRef        = useRef(null);
+
   const [cameraOn, setCameraOn]           = useState(false);
   const [capturedImg, setCapturedImg]     = useState(null);
   const [aiStage, setAiStage]             = useState(-1);
   const [modelReady, setModelReady]       = useState(false);
   const [modelStatus, setModelStatus]     = useState('Loading AI...');
 
-  // AI counters
-  const blinkRef     = useRef(0);
-  const smileRef     = useRef(false);
-  const headRef      = useRef(false);
-  const prevEyeRatio = useRef(null);
+  // Blink cooldown: prevent counting same blink 30 times
+  const blinkCooldown  = useRef(false);
+  const blinkRef       = useRef(0);
+  const smileRef       = useRef(false);
+  const headRef        = useRef(false);
 
-  // Challenge state
   const [challenge, setChallenge]         = useState(null);
   const [challengeDone, setChallengeDone] = useState({ blink: false, smile: false, turn: false });
   const [liveScore, setLiveScore]         = useState(0);
   const [faceVisible, setFaceVisible]     = useState(false);
 
-  // Preload model in background
+  // Load model
   useEffect(() => {
     setModelStatus('Loading AI model...');
     loadModel()
@@ -92,7 +92,7 @@ export default function VerifyPage() {
       .catch(() => { setModelStatus('AI failed to load ❌'); });
   }, []);
 
-  // Cleanup on unmount
+  // Cleanup
   useEffect(() => () => {
     cancelAnimationFrame(rafRef.current);
     streamRef.current?.getTracks().forEach(t => t.stop());
@@ -136,11 +136,10 @@ export default function VerifyPage() {
         await videoRef.current.play();
       }
       setCameraOn(true);
-      // Reset counters
       blinkRef.current = 0;
       smileRef.current = false;
       headRef.current  = false;
-      prevEyeRatio.current = null;
+      blinkCooldown.current = false;
       resetMotion();
       setChallengeDone({ blink: false, smile: false, turn: false });
       setLiveScore(0);
@@ -159,45 +158,41 @@ export default function VerifyPage() {
     setCameraOn(false);
   }, []);
 
-  // Real-time AI analysis loop
+  // Real-time AI loop
   useEffect(() => {
     if (!cameraOn || !modelReady) return;
     let running = true;
-    // Track motion history for spike detection (blink = sudden high→low→high motion)
-    let eyeMotionHistory = [];
 
     const loop = async () => {
       if (!running) return;
 
-      const data = await analyzeFrame(videoRef.current, overlayCanvas.current);
+      const data = await analyzeFrame(videoRef.current, offscreenRef.current);
 
       if (data?.faceDetected) {
         setFaceVisible(true);
 
-        // --- Blink: spike in eye-region pixel motion ---
-        const em = data.eyeMotion;
-        eyeMotionHistory.push(em);
-        if (eyeMotionHistory.length > 6) eyeMotionHistory.shift();
-
-        // A blink = motion spike > 5px avg diff (eyes close & reopen)
-        if (em > 5) {
+        // BLINK: spike in eye-region motion + cooldown to avoid double-counting
+        const em = data.eyeMotion ?? 0;
+        if (em > 4 && !blinkCooldown.current) {
+          blinkCooldown.current = true;
           blinkRef.current += 1;
           setChallengeDone(p => ({ ...p, blink: blinkRef.current >= 2 }));
+          // Cooldown 600ms so one blink = one event
+          setTimeout(() => { blinkCooldown.current = false; }, 600);
         }
 
-        // --- Head turn ---
+        // HEAD TURN
         if (data.lookingLeft || data.lookingRight) {
           headRef.current = true;
           setChallengeDone(p => ({ ...p, turn: true }));
         }
 
-        // --- Smile: mouth-region pixel motion while in smile challenge ---
-        if (data.mouthMotion > 6 && challenge === 'smile') {
+        // SMILE: mouth motion > threshold
+        if ((data.mouthMotion ?? 0) > 5 && challenge === 'smile') {
           smileRef.current = true;
           setChallengeDone(p => ({ ...p, smile: true }));
         }
 
-        // Score
         const s = computeLivenessScore({
           blinks: blinkRef.current,
           smileDetected: smileRef.current,
@@ -226,17 +221,11 @@ export default function VerifyPage() {
   const capturePhoto = useCallback(() => {
     if (!videoRef.current || !canvasRef.current) return;
     const v = videoRef.current, c = canvasRef.current;
-    c.width  = v.videoWidth;
-    c.height = v.videoHeight;
+    c.width = v.videoWidth; c.height = v.videoHeight;
     c.getContext('2d').drawImage(v, 0, 0);
     setCapturedImg(c.toDataURL('image/jpeg', 0.85));
     stopCamera();
   }, [stopCamera]);
-
-  // hidden canvas for motion detection overlay (same size as video)
-  const overlayCanvasEl = (
-    <canvas ref={overlayCanvas} style={{ display: 'none' }} />
-  );
 
   const runAiProcessing = async () => {
     // Hard fail if challenges not completed
@@ -422,6 +411,8 @@ export default function VerifyPage() {
                   }}>
                     <video ref={videoRef} autoPlay playsInline muted
                       style={{ width: '100%', height: '100%', objectFit: 'cover', display: cameraOn ? 'block' : 'none', transform: 'scaleX(-1)' }} />
+                    {/* Hidden offscreen canvas for motion detection — MUST be in DOM */}
+                    <canvas ref={offscreenRef} style={{ display: 'none' }} />
                     {capturedImg && !cameraOn && (
                       <img src={capturedImg} alt="Captured" style={{ width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)' }} />
                     )}
